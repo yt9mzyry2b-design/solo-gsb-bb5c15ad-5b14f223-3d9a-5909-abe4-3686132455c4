@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <h1>单向抓包负载重组</h1>
-    <p class="subtitle">按字节偏移重组乱序分片 · 重叠同值去重 · 异值标冲突 · 列出全部缺口 · A/B 双次抓包差异定位</p>
+    <p class="subtitle">按字节偏移重组乱序分片 · 重叠同值去重 · 异值标冲突 · 列出全部缺口 · A/B 双次抓包差异定位 · 分片到达过程诊断</p>
   </header>
 
   <main>
@@ -34,6 +34,7 @@
         <button id="loadDemoGap" type="button" class="btn btn-ghost">填充示例：乱序+冲突+缺口</button>
         <button id="loadDemoOk" type="button" class="btn btn-ghost">填充示例：完整可下载</button>
         <button id="submit" type="button" class="btn btn-primary">重组</button>
+        <button id="traceSubmit" type="button" class="btn">诊断到达过程</button>
       </div>
       <div id="error" class="error" hidden></div>
     </section>
@@ -87,6 +88,43 @@
         <button id="downloadBtn" type="button" class="btn btn-download" hidden>⬇ 下载还原的二进制</button>
         <span id="downloadNote" class="hint"></span>
       </div>
+    </section>
+
+    <section id="traceResultCard" class="card" hidden>
+      <h2>分片到达过程诊断 · 结果</h2>
+
+      <div id="traceBanner" class="banner"></div>
+
+      <div class="stats" id="traceStats"></div>
+
+      <h3>到达步骤表（按录入顺序逐片应用；红字行为引入新冲突的分片）</h3>
+      <div class="table-wrap trace-table-wrap">
+        <table id="traceTable">
+          <thead>
+            <tr>
+              <th>#</th><th>起始偏移</th><th>长度</th><th>覆盖范围</th>
+              <th>新增覆盖</th><th>新增冲突</th><th>累计覆盖</th><th>累计冲突</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <h3>首次冲突样本 <span id="traceSampleCount" class="count"></span></h3>
+      <div class="table-wrap trace-table-wrap">
+        <table id="traceSampleTable">
+          <thead>
+            <tr>
+              <th>偏移</th><th>最先写入的分片</th><th>原值</th>
+              <th>触发冲突的分片</th><th>冲突值</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div id="traceSampleNote" class="hint"></div>
+
+      <div class="hint trace-note">诊断仅按录入顺序回放分片到达过程，不生成下载、不占用服务端结果缓存。</div>
     </section>
 
     <section class="card">

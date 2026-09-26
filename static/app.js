@@ -70,6 +70,7 @@ function loadDemo(expected, frags) {
   frags.forEach(([off, data]) => addFragment(off, data));
   els.resultCard.hidden = true;
   els.error.hidden = true;
+  document.getElementById("traceResultCard").hidden = true;
 }
 
 els.addFrag.addEventListener("click", () => addFragment());
@@ -95,46 +96,44 @@ function showError(msg) {
   els.error.hidden = false;
 }
 
-els.submit.addEventListener("click", () => {
-  els.error.hidden = true;
-  let expected;
-  try {
-    expected = parseOffset(els.expectedLength.value, "预期字节数");
-  } catch (e) {
-    showError(e.message);
-    return;
-  }
-
+// 收集单次重组表单中的分片（到达过程诊断复用同一表单与录入顺序）
+function collectSingleFragments(expected) {
   const rows = [...els.fragments.querySelectorAll(".frag-row")];
   const fragments = [];
+  rows.forEach((row, i) => {
+    const offText = row.querySelector(".frag-offset").value;
+    const dataText = row.querySelector(".frag-data").value;
+    if (offText.trim() === "" && dataText.trim() === "") return; // 跳过完全空行
+    const off = parseOffset(offText, `分片 #${i + 1} 的起始偏移`);
+    const stripped = dataText.replace(/[\s:_-]/g, "");
+    if (stripped === "") throw new Error(`分片 #${i + 1} 的十六进制内容为空`);
+    if (stripped.length % 2 !== 0) {
+      throw new Error(`分片 #${i + 1} 的十六进制长度为奇数（${stripped.length}）`);
+    }
+    if (!/^[0-9a-fA-F]+$/.test(stripped)) {
+      throw new Error(`分片 #${i + 1} 含非法十六进制字符`);
+    }
+    if (off + stripped.length / 2 > expected) {
+      throw new Error(
+        `分片 #${i + 1}（偏移 ${off}，长度 ${stripped.length / 2}）超出预期长度 ${expected}`
+      );
+    }
+    fragments.push({ offset: off, data: stripped });
+  });
+  if (fragments.length === 0) {
+    throw new Error("请至少填写一个分片（起始偏移 + 十六进制内容）");
+  }
+  return fragments;
+}
+
+els.submit.addEventListener("click", () => {
+  els.error.hidden = true;
+  let expected, fragments;
   try {
-    rows.forEach((row, i) => {
-      const offText = row.querySelector(".frag-offset").value;
-      const dataText = row.querySelector(".frag-data").value;
-      if (offText.trim() === "" && dataText.trim() === "") return; // 跳过完全空行
-      const off = parseOffset(offText, `分片 #${i + 1} 的起始偏移`);
-      const stripped = dataText.replace(/[\s:_-]/g, "");
-      if (stripped === "") throw new Error(`分片 #${i + 1} 的十六进制内容为空`);
-      if (stripped.length % 2 !== 0) {
-        throw new Error(`分片 #${i + 1} 的十六进制长度为奇数（${stripped.length}）`);
-      }
-      if (!/^[0-9a-fA-F]+$/.test(stripped)) {
-        throw new Error(`分片 #${i + 1} 含非法十六进制字符`);
-      }
-      if (off + stripped.length / 2 > expected) {
-        throw new Error(
-          `分片 #${i + 1}（偏移 ${off}，长度 ${stripped.length / 2}）超出预期长度 ${expected}`
-        );
-      }
-      fragments.push({ offset: off, data: stripped });
-    });
+    expected = parseOffset(els.expectedLength.value, "预期字节数");
+    fragments = collectSingleFragments(expected);
   } catch (e) {
     showError(e.message);
-    return;
-  }
-
-  if (fragments.length === 0) {
-    showError("请至少填写一个分片（起始偏移 + 十六进制内容）");
     return;
   }
 
@@ -411,3 +410,137 @@ function invalidateResult() {
 }
 els.expectedLength.addEventListener("input", invalidateResult);
 els.fragments.addEventListener("input", invalidateResult);
+
+// ------------------------------ 分片到达过程诊断 ------------------------------
+// 复用上方单次重组表单（预期长度 + 分片录入顺序），调用 /api/arrival-trace，
+// 逐片展示新增覆盖 / 首次冲突与累计值；诊断结果不进入下载缓存。
+
+const traceEls = {
+  submit: document.getElementById("traceSubmit"),
+  resultCard: document.getElementById("traceResultCard"),
+  banner: document.getElementById("traceBanner"),
+  stats: document.getElementById("traceStats"),
+  tableBody: document.querySelector("#traceTable tbody"),
+  sampleCount: document.getElementById("traceSampleCount"),
+  sampleBody: document.querySelector("#traceSampleTable tbody"),
+  sampleNote: document.getElementById("traceSampleNote"),
+};
+
+function hexByte(v) {
+  return "0x" + v.toString(16).padStart(2, "0");
+}
+
+traceEls.submit.addEventListener("click", () => {
+  els.error.hidden = true;
+  let expected, fragments;
+  try {
+    expected = parseOffset(els.expectedLength.value, "预期字节数");
+    fragments = collectSingleFragments(expected);
+  } catch (e) {
+    showError(e.message);
+    return;
+  }
+
+  traceEls.submit.disabled = true;
+  traceEls.submit.textContent = "诊断中…";
+  fetch("/api/arrival-trace", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ expected_length: expected, fragments }),
+  })
+    .then(async (resp) => {
+      const body = await resp.json();
+      if (!resp.ok) throw new Error(body.detail || `HTTP ${resp.status}`);
+      renderTrace(expected, body);
+    })
+    .catch((e) => showError(e.message))
+    .finally(() => {
+      traceEls.submit.disabled = false;
+      traceEls.submit.textContent = "诊断到达过程";
+    });
+});
+
+function renderTrace(expected, r) {
+  traceEls.resultCard.hidden = false;
+  traceEls.resultCard.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  const firstConflictStep = r.steps.find((s) => s.new_conflicts > 0) || null;
+  const f = r.final;
+
+  if (f.conflict_length > 0) {
+    traceEls.banner.className = "banner bad";
+    traceEls.banner.textContent =
+      `✗ 到达过程中共 ${f.conflict_length} 字节首次变为冲突，` +
+      `最早由分片 #${firstConflictStep.index} 引入（该步新增冲突 ${firstConflictStep.new_conflicts} 字节）。`;
+  } else if (f.gap_length > 0) {
+    traceEls.banner.className = "banner warn";
+    traceEls.banner.textContent =
+      `到达过程无冲突；最终仍缺 ${f.gap_length} 字节未覆盖（已覆盖 ${f.covered_length} / ${expected}）。`;
+  } else {
+    traceEls.banner.className = "banner ok";
+    traceEls.banner.textContent =
+      `✓ ${r.fragment_count} 个分片依次到达后完整覆盖 ${expected} 字节，无任何冲突。`;
+  }
+
+  traceEls.stats.innerHTML = "";
+  [
+    ["分片数", r.fragment_count],
+    ["输入字节总量", r.total_input_bytes],
+    ["最终覆盖", `${f.covered_length} / ${expected}`, f.gap_length ? "warn" : "ok"],
+    ["最终缺口", f.gap_length, f.gap_length ? "bad" : "ok"],
+    ["最终冲突", f.conflict_length, f.conflict_length ? "bad" : "ok"],
+    ["首次引入冲突的分片", firstConflictStep ? `#${firstConflictStep.index}` : "无", firstConflictStep ? "bad" : "ok"],
+    ["分片是否按序到达", r.in_order ? "是" : "否（乱序）", r.in_order ? "ok" : "warn"],
+  ].forEach(([k, v, cls]) => traceEls.stats.appendChild(addStat(k, v, cls)));
+
+  // 到达步骤表：引入新冲突的分片整行标红，最早的一行加「首次引入冲突」标记
+  traceEls.tableBody.innerHTML = "";
+  r.steps.forEach((s) => {
+    const tr = document.createElement("tr");
+    if (s.new_conflicts > 0) tr.className = "trace-conflict";
+    const mark =
+      firstConflictStep && s.index === firstConflictStep.index
+        ? '<span class="first-mark">◀ 首次引入冲突</span>'
+        : "";
+    tr.innerHTML =
+      `<td>${s.index}${mark}</td>` +
+      `<td><code>${s.offset} (${hexOff(s.offset)})</code></td>` +
+      `<td>${s.length}</td>` +
+      `<td><code>[${s.offset}, ${s.end})</code></td>` +
+      `<td>${s.new_covered}</td>` +
+      `<td class="${s.new_conflicts ? "cell-bad" : ""}">${s.new_conflicts}</td>` +
+      `<td>${s.cumulative_covered}</td>` +
+      `<td class="${s.cumulative_conflicts ? "cell-bad" : ""}">${s.cumulative_conflicts}</td>`;
+    traceEls.tableBody.appendChild(tr);
+  });
+
+  // 首次冲突样本：偏移 + 最先写入的分片 + 触发冲突的分片
+  traceEls.sampleCount.textContent = `（${r.first_conflict_samples.length} 条）`;
+  traceEls.sampleBody.innerHTML = "";
+  if (r.first_conflict_samples.length === 0) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = '<td colspan="5" class="empty">无首次冲突：所有到达均为首次覆盖或同值重发。</td>';
+    traceEls.sampleBody.appendChild(tr);
+  } else {
+    r.first_conflict_samples.forEach((sm) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML =
+        `<td><code>${sm.offset} (${hexOff(sm.offset)})</code></td>` +
+        `<td>分片 #${sm.first_fragment}</td>` +
+        `<td><code>${hexByte(sm.first_value)}</code></td>` +
+        `<td>分片 #${sm.conflict_fragment}</td>` +
+        `<td><code>${hexByte(sm.conflict_value)}</code></td>`;
+      traceEls.sampleBody.appendChild(tr);
+    });
+  }
+  traceEls.sampleNote.textContent = r.first_conflict_samples_truncated
+    ? `首次冲突位置共 ${f.conflict_length} 处，仅列出前 ${r.first_conflict_samples.length} 处（上限 ${r.sample_limit} 条）。`
+    : "";
+}
+
+// 输入变化后旧的诊断结果不再可信，隐藏诊断结果区
+function invalidateTrace() {
+  traceEls.resultCard.hidden = true;
+}
+els.expectedLength.addEventListener("input", invalidateTrace);
+els.fragments.addEventListener("input", invalidateTrace);

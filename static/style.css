@@ -192,6 +192,15 @@ th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 th { color: var(--muted); font-weight: 600; background: var(--panel-2); }
 td code { font-family: var(--mono); }
 
+/* 到达过程诊断 */
+.trace-table-wrap { max-height: 320px; overflow: auto; }
+.trace-table-wrap thead th { position: sticky; top: 0; }
+tr.trace-conflict td { background: rgba(255, 93, 93, .07); }
+.cell-bad { color: var(--bad); font-weight: 700; }
+td.empty { color: var(--muted); }
+.first-mark { display: block; color: var(--bad); font-weight: 700; font-size: 11px; }
+.trace-note { margin-top: 12px; }
+
 .preview {
   background: #0b0f14; border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; font-family: var(--mono); font-size: 12px;

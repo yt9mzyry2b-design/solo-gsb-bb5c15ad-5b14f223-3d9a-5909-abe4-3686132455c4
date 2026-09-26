@@ -1,4 +1,4 @@
-"""FastAPI 入口：重组 API、双次抓包差异定位 API、结果下载与静态页面托管。"""
+"""FastAPI 入口：重组 API、双次抓包差异定位 API、分片到达过程诊断 API、结果下载与静态页面托管。"""
 
 from __future__ import annotations
 
@@ -15,8 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from .reassembly import (
+    FIRST_CONFLICT_SAMPLE_LIMIT,
     MAX_DIFF_WINDOW as DEFAULT_MAX_DIFF_WINDOW,
     ReassemblyError,
+    arrival_trace as run_arrival_trace,
     assemble,
     diff_captures,
 )
@@ -81,8 +83,8 @@ def _store_job(payload: bytes) -> str:
 
 app = FastAPI(
     title="单向抓包负载重组工具",
-    description="按字节偏移重组乱序分片，标注重叠冲突与覆盖缺口；支持 A/B 双次抓包差异定位。",
-    version="1.1.0",
+    description="按字节偏移重组乱序分片，标注重叠冲突与覆盖缺口；支持 A/B 双次抓包差异定位与分片到达过程诊断。",
+    version="1.2.0",
 )
 
 
@@ -100,6 +102,7 @@ async def health() -> dict[str, Any]:
             "max_fragments": MAX_FRAGMENTS,
             "max_total_input": MAX_TOTAL_INPUT,
             "max_diff_window": MAX_DIFF_WINDOW,
+            "max_first_conflict_samples": FIRST_CONFLICT_SAMPLE_LIMIT,
         },
     }
 
@@ -131,6 +134,28 @@ async def reassemble(body: ReassembleIn) -> dict[str, Any]:
         report["job_id"] = None
         report["download_url"] = None
     return report
+
+
+@app.post("/api/arrival-trace")
+async def arrival_trace(body: ReassembleIn) -> dict[str, Any]:
+    if body.expected_length > MAX_EXPECTED_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"预期字节数 {body.expected_length} 超过上限 {MAX_EXPECTED_LENGTH}",
+        )
+    if len(body.fragments) > MAX_FRAGMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"分片数量 {len(body.fragments)} 超过上限 {MAX_FRAGMENTS}",
+        )
+
+    # 诊断结果不进入下载缓存，直接返回
+    return run_arrival_trace(
+        body.expected_length,
+        [f.model_dump() for f in body.fragments],
+        max_fragments=MAX_FRAGMENTS,
+        max_total_input=MAX_TOTAL_INPUT,
+    )
 
 
 @app.post("/api/diff")
