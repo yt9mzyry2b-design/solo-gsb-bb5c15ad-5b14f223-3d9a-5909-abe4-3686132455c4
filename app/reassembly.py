@@ -10,10 +10,16 @@
 另提供双次抓包差异定位：对 A/B 两组分片分别重建逐字节状态
 （唯一值 / 缺口 / 冲突），在指定比较窗口内逐偏移判定异同，
 并把连续同类且原因相同的字节合并为半开区间。
+
+还提供分片到达过程诊断：沿用单次重组的预期长度与分片录入顺序，
+按字节维护未覆盖 / 唯一值 / 冲突三种状态，逐片统计本次新增覆盖、
+首次变为冲突的字节数，并为每个首次冲突的字节留档
+（偏移、最先写入的分片、触发冲突的分片），便于定位首个引入冲突的分片。
 """
 
 from __future__ import annotations
 
+from array import array
 from typing import Any
 
 # 每个冲突位置最多保留几个不同取值（用于页面展示，防止异常输入撑爆内存）
@@ -22,6 +28,8 @@ SAMPLE_VALUES_PER_POSITION = 8
 SAMPLE_POSITION_LIMIT = 2000
 # 覆盖区预览最多返回多少字节
 PREVIEW_LIMIT = 512
+# 到达过程诊断中，最多保留多少个首次冲突字节样本
+TRACE_CONFLICT_SAMPLE_LIMIT = 2000
 # 双次抓包差异定位中，比较窗口的最大字节数
 MAX_DIFF_WINDOW = 65536
 
@@ -254,6 +262,132 @@ def assemble(
         "fragments": fragment_report,
     }
     return report, payload_out
+
+
+def trace_arrival(
+    expected_length: int,
+    fragments: list[dict[str, Any]],
+    *,
+    max_fragments: int,
+    max_total_input: int,
+    sample_limit: int = TRACE_CONFLICT_SAMPLE_LIMIT,
+) -> dict[str, Any]:
+    """分片到达过程诊断。
+
+    沿用单次重组的预期长度与分片录入顺序，按字节维护三种状态：
+      * 未覆盖；
+      * 唯一值（已被覆盖且只出现过一个取值，并记录最先写入的分片）；
+      * 冲突（曾收到互相矛盾的取值）。
+
+    逐片（按录入顺序的每一步）统计：
+      * new_covered_bytes   —— 本次新覆盖（未覆盖 -> 唯一值）的字节数；
+      * first_conflict_bytes —— 本次首次变为冲突（唯一值 -> 冲突）的字节数；
+      * same_value_bytes    —— 本次对唯一值位置的同值重发（无状态变化）字节数；
+      * conflict_rewrite_bytes —— 本次对已冲突位置的后续写入（无状态变化）字节数。
+
+    同值重发与已冲突位置的后续写入均不改变状态，因此不计入任何状态变化，
+    也不会产生新的首次冲突样本。每个首次冲突字节只留档一次，
+    记录偏移、最先写入的分片（first_writer）与触发冲突的分片（trigger），
+    样本总数受 sample_limit 限幅。
+    """
+    _check_expected_length(expected_length)
+    parsed, total_input, _ = _parse_fragments(
+        expected_length,
+        fragments,
+        max_fragments=max_fragments,
+        max_total_input=max_total_input,
+    )
+
+    # 每个位置最先写入的取值（冲突后保留，便于展示）
+    data = bytearray(expected_length)
+    covered = bytearray(expected_length)  # 0/1：是否已被覆盖
+    conflict = bytearray(expected_length)  # 0/1：是否已冲突
+    # 每个位置最先写入的分片序号（1 起算，与表单 # 序号一致）
+    owners = array("i", [-1]) * expected_length
+
+    covered_total = 0  # 累计已覆盖（唯一值 + 冲突）字节数
+    conflict_total = 0  # 累计冲突字节数
+    first_conflict_total = 0  # 首次冲突事件总数（限幅前）
+    samples: list[dict[str, Any]] = []
+
+    steps: list[dict[str, Any]] = []
+    for step, (offset, payload) in enumerate(parsed, start=1):
+        new_covered = 0
+        first_conflict = 0
+        same_value = 0
+        conflict_rewrite = 0
+        step_samples: list[dict[str, Any]] = []
+
+        for j, value in enumerate(payload):
+            pos = offset + j
+            if not covered[pos]:
+                # 未覆盖 -> 唯一值
+                covered[pos] = 1
+                data[pos] = value
+                owners[pos] = step
+                new_covered += 1
+                continue
+            if not conflict[pos]:
+                if data[pos] == value:
+                    # 对唯一值位置的同值重发：无状态变化
+                    same_value += 1
+                    continue
+                # 唯一值 -> 冲突：本次首次冲突
+                conflict[pos] = 1
+                first_conflict += 1
+                first_conflict_total += 1
+                sample = {
+                    "offset": pos,
+                    "first_writer": owners[pos],
+                    "trigger": step,
+                    "first_value": data[pos],
+                    "trigger_value": value,
+                }
+                step_samples.append(sample)
+                if first_conflict_total <= sample_limit:
+                    samples.append(sample)
+            else:
+                # 已冲突位置的后续写入：不重复计入状态变化
+                conflict_rewrite += 1
+
+        covered_total += new_covered
+        conflict_total += first_conflict
+        steps.append(
+            {
+                "index": step,
+                "offset": offset,
+                "length": len(payload),
+                "end": offset + len(payload),
+                "new_covered_bytes": new_covered,
+                "first_conflict_bytes": first_conflict,
+                "same_value_bytes": same_value,
+                "conflict_rewrite_bytes": conflict_rewrite,
+                "covered_total": covered_total,
+                "conflict_total": conflict_total,
+                "first_conflict_samples": step_samples,
+            }
+        )
+
+    first_conflict_step = next(
+        (st["index"] for st in steps if st["first_conflict_bytes"] > 0), None
+    )
+
+    return {
+        "expected_length": expected_length,
+        "stats": {
+            "fragment_count": len(parsed),
+            "total_input_bytes": total_input,
+            "covered_length": covered_total,
+            "gap_length": expected_length - covered_total,
+            "conflict_length": conflict_total,
+            "first_conflict_event_count": first_conflict_total,
+        },
+        "steps": steps,
+        "first_conflict_step": first_conflict_step,
+        "first_conflict_samples": samples,
+        "first_conflict_samples_truncated": first_conflict_total > len(samples),
+        "first_conflict_sample_limit": sample_limit,
+    }
 
 
 def _side_reason(covered: bytearray, conflict: bytearray, pos: int) -> str | None:

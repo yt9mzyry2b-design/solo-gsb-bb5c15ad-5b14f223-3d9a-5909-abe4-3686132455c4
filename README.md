@@ -14,6 +14,7 @@
 - **可视化**：按偏移绘制覆盖 / 冲突 / 缺口色带（悬停查看字节范围），并提供 16 字节一行的 hex dump 预览。
 - **下载门槛**：只有当范围**完整（无任何缺口）且无冲突**时，才出现「下载还原的二进制」按钮；否则只给出原因，不提供下载。
 - **双次抓包差异定位（A/B 对比）**：对同一预期长度录入 A/B 两组分片并指定比较窗口，逐偏移判定两侧是**唯一值 / 缺口 / 冲突**；只有两侧均为唯一值时才归为**相同**或**不同**，其余归为**不可判定**并标明两侧原因（缺口 / 冲突）。连续同类且原因相同的字节合并为半开区间 `[start, end)`，页面展示各类字节数、差异区间与不可判定区间，并可用「上一窗口 / 下一窗口」平移窗口查看后续位置。窗口须落在 `[0, 预期长度)` 内且长度不超过 **65536** 字节。
+- **分片到达过程诊断（`/api/arrival-trace`）**：沿用单次重组表单的预期长度和分片录入顺序，按字节维护**未覆盖 / 唯一值 / 冲突**三种状态，逐片统计本次新增覆盖、首次变为冲突的字节数，以及同值重发、已冲突位置后续写入（后两者不重复计入状态变化）。响应给出每一步的累计覆盖 / 累计冲突，并有上限地保留**首次冲突样本**（偏移、最先写入的分片、触发冲突的分片及各自取值）；页面用步骤表展示，首个引入冲突的分片整行标红，便于快速定位。诊断不产生可下载结果，也不进入下载缓存。
 - 结果只在服务端内存中临时保存（默认 100 份 / 30 分钟，LRU + 过期淘汰），过期后需重新重组。
 
 ## 一条命令启动（Docker Compose）
@@ -168,6 +169,71 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 - `sides` 为两侧在**整个** `[0, expected_length)` 范围内的整体统计（覆盖 / 缺口 / 冲突字节数等），不局限于窗口。
 - 差异定位不产生可下载结果；下载仍由 `/api/reassemble` 提供。
 
+### `POST /api/arrival-trace`
+
+分片到达过程诊断：请求体与 `/api/reassemble` 完全一致（同样的 `expected_length` + `fragments`，同样的校验与输入上限：hex 解析、越界、分片数、字节总量、预期长度），但按**分片录入顺序**逐步回放，不产生下载结果，也**不进入下载缓存**。
+
+逐字节状态机为：未覆盖 → 唯一值（记录最先写入的分片）→ 冲突。每个字节只在第一次收到矛盾取值时发生一次「首次冲突」；**同值重发**和**已冲突位置的后续写入都不重复计入状态变化**。
+
+请求体（沿用上面的乱序 + 冲突示例）：
+
+```json
+{
+  "expected_length": 16,
+  "fragments": [
+    {"offset": 10, "data": "313020746f"},
+    {"offset": 0,  "data": "48656c6c6f20576f"},
+    {"offset": 6,  "data": "5858313020746f21"}
+  ]
+}
+```
+
+响应（节选）：
+
+```json
+{
+  "expected_length": 16,
+  "stats": {
+    "fragment_count": 3,
+    "total_input_bytes": 21,
+    "covered_length": 15,
+    "gap_length": 1,
+    "conflict_length": 6,
+    "first_conflict_event_count": 6
+  },
+  "first_conflict_step": 3,
+  "steps": [
+    {"index": 1, "offset": 10, "length": 5, "end": 15,
+     "new_covered_bytes": 5, "first_conflict_bytes": 0,
+     "same_value_bytes": 0, "conflict_rewrite_bytes": 0,
+     "covered_total": 5, "conflict_total": 0, "first_conflict_samples": []},
+    {"index": 2, "offset": 0, "length": 8, "end": 8,
+     "new_covered_bytes": 8, "first_conflict_bytes": 0,
+     "same_value_bytes": 0, "conflict_rewrite_bytes": 0,
+     "covered_total": 13, "conflict_total": 0, "first_conflict_samples": []},
+    {"index": 3, "offset": 6, "length": 8, "end": 14,
+     "new_covered_bytes": 2, "first_conflict_bytes": 6,
+     "same_value_bytes": 0, "conflict_rewrite_bytes": 0,
+     "covered_total": 15, "conflict_total": 6,
+     "first_conflict_samples": [
+       {"offset": 6, "first_writer": 2, "trigger": 3,
+        "first_value": 87, "trigger_value": 88}
+     ]}
+  ],
+  "first_conflict_samples": [
+    {"offset": 6,  "first_writer": 2, "trigger": 3, "first_value": 87, "trigger_value": 88},
+    {"offset": 7,  "first_writer": 2, "trigger": 3, "first_value": 111, "trigger_value": 88}
+  ],
+  "first_conflict_samples_truncated": false,
+  "first_conflict_sample_limit": 2000
+}
+```
+
+- `steps` 与提交顺序一一对应：每步给出本片的偏移 / 长度 / 覆盖范围、**本次新增覆盖**（`new_covered_bytes`）、**本次首次冲突**（`first_conflict_bytes`）、同值重发（`same_value_bytes`）、已冲突位置再写（`conflict_rewrite_bytes`），以及步末的**累计覆盖**与**累计冲突**；四项字节数之和等于该片长度。
+- `first_conflict_step` 为首个引入冲突的分片序号（无冲突时为 `null`），可直接定位「从哪一片开始出问题」。
+- `first_conflict_samples` 为有上限（默认 2000，受 `first_conflict_sample_limit` 标识）的首次冲突样本，每个样本标明字节偏移、**最先写入该位置的分片**（`first_writer`）与**触发冲突的分片**（`trigger`）及两者取值；超出上限时 `first_conflict_samples_truncated=true`，但 `first_conflict_event_count` 仍是完整计数。每个字节最多只在其首次冲突时被记录一次。
+- 输入错误（越界、奇数位 hex、非 hex 字符、超过上限等）与 `/api/reassemble` 一样返回 `400 {"detail": "..."}`。
+
 ### `GET /api/download/{job_id}`
 
 下载重组完成的原始二进制（`application/octet-stream`）。结果过期或未知返回 404。
@@ -176,8 +242,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 打开页面后可点击：
 
-- **「填充示例：乱序+冲突+缺口」**：验证乱序排序、异值冲突标红和尾部缺口；
-- **「填充示例：完整可下载」**：两片在偏移 10 处同值重叠（去重），覆盖全部 16 字节，可直接下载；
+- **「填充示例：乱序+冲突+缺口」**：验证乱序排序、异值冲突标红和尾部缺口；填好后点「分片到达过程诊断」可看到第 3 个分片首个引入冲突（整行标红），首次冲突样本标明冲突偏移由哪个分片最先写入、由哪个分片触发；
+- **「填充示例：完整可下载」**：两片在偏移 10 处同值重叠（去重），覆盖全部 16 字节，可直接下载；对该示例做到达过程诊断可看到同值重发只计入「同值重发」列，不产生冲突；
 - **「填充对比示例」**（差异定位区）：A 侧在偏移 22 处有冲突、B 侧缺 `[12,16)`、偏移 17 处两侧取值不同，可看到「相同 18 / 不同 1 / 不可判定 5」的统计与区间合并效果；再点「下一窗口 →」可平移比较窗口。
 
 ## 目录结构
@@ -187,10 +253,11 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 ├── app/
 │   ├── __init__.py
 │   ├── main.py          # FastAPI 路由、任务缓存、静态托管
-│   └── reassembly.py    # 重组核心：去重 / 冲突 / 缺口；A/B 差异定位
+│   └── reassembly.py    # 重组核心：去重 / 冲突 / 缺口；A/B 差异定位；到达过程诊断
 ├── static/
 │   ├── index.html       # 页面结构
 │   ├── app.js           # 原生 JS：单次重组表单、可视化、下载
+│   ├── trace.js         # 原生 JS：分片到达过程诊断步骤表与首次冲突样本
 │   ├── diff.js          # 原生 JS：A/B 双次抓包差异定位
 │   └── style.css
 ├── Dockerfile

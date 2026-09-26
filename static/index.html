@@ -9,7 +9,7 @@
 <body>
   <header class="topbar">
     <h1>单向抓包负载重组</h1>
-    <p class="subtitle">按字节偏移重组乱序分片 · 重叠同值去重 · 异值标冲突 · 列出全部缺口 · A/B 双次抓包差异定位</p>
+    <p class="subtitle">按字节偏移重组乱序分片 · 重叠同值去重 · 异值标冲突 · 列出全部缺口 · A/B 双次抓包差异定位 · 分片到达过程诊断</p>
   </header>
 
   <main>
@@ -34,6 +34,7 @@
         <button id="loadDemoGap" type="button" class="btn btn-ghost">填充示例：乱序+冲突+缺口</button>
         <button id="loadDemoOk" type="button" class="btn btn-ghost">填充示例：完整可下载</button>
         <button id="submit" type="button" class="btn btn-primary">重组</button>
+        <button id="traceSubmit" type="button" class="btn">分片到达过程诊断</button>
       </div>
       <div id="error" class="error" hidden></div>
     </section>
@@ -87,6 +88,37 @@
         <button id="downloadBtn" type="button" class="btn btn-download" hidden>⬇ 下载还原的二进制</button>
         <span id="downloadNote" class="hint"></span>
       </div>
+    </section>
+
+    <section id="traceCard" class="card" hidden>
+      <h2>分片到达过程诊断 · 结果</h2>
+
+      <div id="traceBanner" class="banner"></div>
+
+      <div class="stats" id="traceStats"></div>
+
+      <h3>到达步骤表（按分片录入顺序，逐步累计）</h3>
+      <div class="table-wrap">
+        <table id="traceTable">
+          <thead>
+            <tr>
+              <th>#</th><th>起始偏移</th><th>长度</th><th>覆盖范围</th>
+              <th>本次新增覆盖</th><th>本次首次冲突</th>
+              <th>同值重发</th><th>已冲突位置再写</th>
+              <th>累计覆盖</th><th>累计冲突</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <p class="hint">
+        「同值重发」与「已冲突位置再写」不改变逐字节状态，不计入覆盖 / 冲突增长；
+        每一行的「新增覆盖 + 首次冲突 + 同值重发 + 已冲突位置再写」等于该片长度。
+      </p>
+
+      <h3>首次冲突样本（标明偏移、最先写入的分片与触发冲突的分片）<span id="traceSampleCount" class="count"></span></h3>
+      <div id="traceSamples" class="samples"></div>
+      <div id="traceSampleNote" class="hint" hidden></div>
     </section>
 
     <section class="card">
@@ -189,6 +221,7 @@
   </footer>
 
   <script src="/static/app.js"></script>
+  <script src="/static/trace.js"></script>
   <script src="/static/diff.js"></script>
 </body>
 </html>

@@ -95,46 +95,44 @@ function showError(msg) {
   els.error.hidden = false;
 }
 
-els.submit.addEventListener("click", () => {
-  els.error.hidden = true;
-  let expected;
-  try {
-    expected = parseOffset(els.expectedLength.value, "预期字节数");
-  } catch (e) {
-    showError(e.message);
-    return;
-  }
-
+// 读取单次重组表单（重组与到达过程诊断共用），输入不合法时抛出 Error
+function readReassemblyForm() {
+  const expected = parseOffset(els.expectedLength.value, "预期字节数");
   const rows = [...els.fragments.querySelectorAll(".frag-row")];
   const fragments = [];
+  rows.forEach((row, i) => {
+    const offText = row.querySelector(".frag-offset").value;
+    const dataText = row.querySelector(".frag-data").value;
+    if (offText.trim() === "" && dataText.trim() === "") return; // 跳过完全空行
+    const off = parseOffset(offText, `分片 #${i + 1} 的起始偏移`);
+    const stripped = dataText.replace(/[\s:_-]/g, "");
+    if (stripped === "") throw new Error(`分片 #${i + 1} 的十六进制内容为空`);
+    if (stripped.length % 2 !== 0) {
+      throw new Error(`分片 #${i + 1} 的十六进制长度为奇数（${stripped.length}）`);
+    }
+    if (!/^[0-9a-fA-F]+$/.test(stripped)) {
+      throw new Error(`分片 #${i + 1} 含非法十六进制字符`);
+    }
+    if (off + stripped.length / 2 > expected) {
+      throw new Error(
+        `分片 #${i + 1}（偏移 ${off}，长度 ${stripped.length / 2}）超出预期长度 ${expected}`
+      );
+    }
+    fragments.push({ offset: off, data: stripped });
+  });
+  if (fragments.length === 0) {
+    throw new Error("请至少填写一个分片（起始偏移 + 十六进制内容）");
+  }
+  return { expected, fragments };
+}
+
+els.submit.addEventListener("click", () => {
+  els.error.hidden = true;
+  let expected, fragments;
   try {
-    rows.forEach((row, i) => {
-      const offText = row.querySelector(".frag-offset").value;
-      const dataText = row.querySelector(".frag-data").value;
-      if (offText.trim() === "" && dataText.trim() === "") return; // 跳过完全空行
-      const off = parseOffset(offText, `分片 #${i + 1} 的起始偏移`);
-      const stripped = dataText.replace(/[\s:_-]/g, "");
-      if (stripped === "") throw new Error(`分片 #${i + 1} 的十六进制内容为空`);
-      if (stripped.length % 2 !== 0) {
-        throw new Error(`分片 #${i + 1} 的十六进制长度为奇数（${stripped.length}）`);
-      }
-      if (!/^[0-9a-fA-F]+$/.test(stripped)) {
-        throw new Error(`分片 #${i + 1} 含非法十六进制字符`);
-      }
-      if (off + stripped.length / 2 > expected) {
-        throw new Error(
-          `分片 #${i + 1}（偏移 ${off}，长度 ${stripped.length / 2}）超出预期长度 ${expected}`
-        );
-      }
-      fragments.push({ offset: off, data: stripped });
-    });
+    ({ expected, fragments } = readReassemblyForm());
   } catch (e) {
     showError(e.message);
-    return;
-  }
-
-  if (fragments.length === 0) {
-    showError("请至少填写一个分片（起始偏移 + 十六进制内容）");
     return;
   }
 

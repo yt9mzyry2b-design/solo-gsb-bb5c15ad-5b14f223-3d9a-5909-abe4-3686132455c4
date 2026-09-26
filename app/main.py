@@ -19,6 +19,7 @@ from .reassembly import (
     ReassemblyError,
     assemble,
     diff_captures,
+    trace_arrival,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -81,8 +82,11 @@ def _store_job(payload: bytes) -> str:
 
 app = FastAPI(
     title="单向抓包负载重组工具",
-    description="按字节偏移重组乱序分片，标注重叠冲突与覆盖缺口；支持 A/B 双次抓包差异定位。",
-    version="1.1.0",
+    description=(
+        "按字节偏移重组乱序分片，标注重叠冲突与覆盖缺口；支持 A/B 双次抓包差异定位，"
+        "并提供按分片录入顺序的到达过程诊断。"
+    ),
+    version="1.2.0",
 )
 
 
@@ -131,6 +135,28 @@ async def reassemble(body: ReassembleIn) -> dict[str, Any]:
         report["job_id"] = None
         report["download_url"] = None
     return report
+
+
+@app.post("/api/arrival-trace")
+async def arrival_trace(body: ReassembleIn) -> dict[str, Any]:
+    """分片到达过程诊断：输入与 /api/reassemble 相同，结果不进入下载缓存。"""
+    if body.expected_length > MAX_EXPECTED_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"预期字节数 {body.expected_length} 超过上限 {MAX_EXPECTED_LENGTH}",
+        )
+    if len(body.fragments) > MAX_FRAGMENTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"分片数量 {len(body.fragments)} 超过上限 {MAX_FRAGMENTS}",
+        )
+
+    return trace_arrival(
+        body.expected_length,
+        [f.model_dump() for f in body.fragments],
+        max_fragments=MAX_FRAGMENTS,
+        max_total_input=MAX_TOTAL_INPUT,
+    )
 
 
 @app.post("/api/diff")

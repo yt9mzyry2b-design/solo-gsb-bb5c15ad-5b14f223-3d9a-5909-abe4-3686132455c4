@@ -192,6 +192,17 @@ th, td { border: 1px solid var(--border); padding: 6px 10px; text-align: left; }
 th { color: var(--muted); font-weight: 600; background: var(--panel-2); }
 td code { font-family: var(--mono); }
 
+/* 到达过程诊断步骤表：引入冲突的行标红，首个引入冲突的分片加重 */
+#traceTable tr.trace-conflict { background: rgba(255, 93, 93, .08); }
+#traceTable tr.trace-conflict td.num-conflict { color: var(--bad); font-weight: 700; }
+#traceTable tr.trace-first-conflict {
+  background: rgba(255, 93, 93, .18);
+  box-shadow: inset 3px 0 0 var(--bad);
+}
+#traceTable tr.trace-first-conflict td { font-weight: 700; }
+#traceTable tr.trace-first-conflict td.num-conflict { color: var(--bad); }
+#traceTable td.trace-more { color: var(--muted); text-align: center; font-style: italic; }
+
 .preview {
   background: #0b0f14; border: 1px solid var(--border); border-radius: 8px;
   padding: 10px 12px; font-family: var(--mono); font-size: 12px;
